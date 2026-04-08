@@ -2,7 +2,7 @@
 Unified Flash Attention interface with automatic FA3/SDPA switching.
 
 Exports `flash_attn` module that matches the FA3 API exactly, but falls back
-to PyTorch SDPA on non-Hopper GPUs (including Blackwell), MPS, and CPU.
+to PyTorch SDPA on non-Hopper GPUs (including Blackwell), NPU, MPS, and CPU.
 
 Usage (drop-in replacement for FA3):
     from nanochat.flash_attention import flash_attn
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 
 # =============================================================================
-# Detection: Try to load FA3 on Hopper+ GPUs
+# Detection: Try to load FA3 on Hopper+ GPUs (CUDA only)
 # =============================================================================
 def _load_flash_attention_3():
     """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""

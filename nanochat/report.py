@@ -42,27 +42,40 @@ def get_git_info():
     return info
 
 def get_gpu_info():
-    """Get GPU information."""
-    if not torch.cuda.is_available():
+    """Get GPU/NPU information."""
+    from nanochat.common import HAS_NPU
+    if torch.cuda.is_available():
+        num_devices = torch.cuda.device_count()
+        info = {
+            "available": True,
+            "count": num_devices,
+            "names": [],
+            "memory_gb": []
+        }
+        for i in range(num_devices):
+            props = torch.cuda.get_device_properties(i)
+            info["names"].append(props.name)
+            info["memory_gb"].append(props.total_memory / (1024**3))
+        info["cuda_version"] = torch.version.cuda or "unknown"
+        info["device_type"] = "cuda"
+        return info
+    elif HAS_NPU:
+        num_devices = torch.npu.device_count()
+        info = {
+            "available": True,
+            "count": num_devices,
+            "names": [],
+            "memory_gb": []
+        }
+        for i in range(num_devices):
+            props = torch.npu.get_device_properties(i)
+            info["names"].append(props.name if hasattr(props, 'name') else f"NPU:{i}")
+            info["memory_gb"].append(props.total_memory / (1024**3) if hasattr(props, 'total_memory') else 0)
+        info["cann_version"] = torch_npu.version.__version__ if hasattr(torch_npu, 'version') else "unknown"
+        info["device_type"] = "npu"
+        return info
+    else:
         return {"available": False}
-
-    num_devices = torch.cuda.device_count()
-    info = {
-        "available": True,
-        "count": num_devices,
-        "names": [],
-        "memory_gb": []
-    }
-
-    for i in range(num_devices):
-        props = torch.cuda.get_device_properties(i)
-        info["names"].append(props.name)
-        info["memory_gb"].append(props.total_memory / (1024**3))
-
-    # Get CUDA version
-    info["cuda_version"] = torch.version.cuda or "unknown"
-
-    return info
 
 def get_system_info():
     """Get system information."""

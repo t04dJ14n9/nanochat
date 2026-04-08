@@ -183,7 +183,7 @@ class Engine:
         # As a quick hack, we're making generate() function inherit and know about this repo-wise assumption.
         # I think there has to be a bigger refactor to deal with device/dtype tracking across the codebase.
         # In particular, the KVCache should allocate its tensors lazily
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        dtype = torch.bfloat16 if device.type in ("cuda", "npu") else torch.float32
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
 
@@ -322,7 +322,8 @@ if __name__ == "__main__":
     prompt_tokens = tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
     # generate the reference sequence using the model.generate() function
     generated_tokens = []
-    torch.cuda.synchronize()
+    from nanochat.common import device_synchronize
+    device_synchronize(device_type)
     t0 = time.time()
     stream = model.generate(prompt_tokens, **kwargs)
     for token in stream:
@@ -330,7 +331,7 @@ if __name__ == "__main__":
         chunk = tokenizer.decode([token])
         print(chunk, end="", flush=True)
     print()
-    torch.cuda.synchronize()
+    device_synchronize(device_type)
     t1 = time.time()
     print(f"Reference time: {t1 - t0:.2f}s")
     reference_ids = generated_tokens
@@ -338,7 +339,7 @@ if __name__ == "__main__":
     generated_tokens = []
     engine = Engine(model, tokenizer)
     stream = engine.generate(prompt_tokens, num_samples=1, **kwargs) # note: runs in fp32
-    torch.cuda.synchronize()
+    device_synchronize(device_type)
     t0 = time.time()
     for token_column, token_masks in stream:
         token = token_column[0] # only print out the first row
@@ -346,7 +347,7 @@ if __name__ == "__main__":
         chunk = tokenizer.decode([token])
         print(chunk, end="", flush=True)
     print()
-    torch.cuda.synchronize()
+    device_synchronize(device_type)
     t1 = time.time()
     print(f"Engine time: {t1 - t0:.2f}s")
     # compare the two sequences

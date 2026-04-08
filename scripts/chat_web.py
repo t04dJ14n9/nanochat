@@ -68,7 +68,7 @@ parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Default m
 parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
 parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--port', type=int, default=8000, help='Port to run the server on')
-parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
+parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'npu', 'cpu', 'mps'], help='Device type for evaluation: cuda|npu|cpu|mps. empty => autodetect')
 parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind the server to')
 args = parser.parse_args()
 
@@ -98,6 +98,9 @@ class WorkerPool:
         if num_gpus is None:
             if device_type == "cuda":
                 num_gpus = torch.cuda.device_count()
+            elif device_type == "npu":
+                from nanochat.common import HAS_NPU
+                num_gpus = torch.npu.device_count() if HAS_NPU else 1
             else:
                 num_gpus = 1 # e.g. cpu|mps
         self.num_gpus = num_gpus
@@ -108,13 +111,16 @@ class WorkerPool:
         """Load model on each GPU."""
         print(f"Initializing worker pool with {self.num_gpus} GPUs...")
         if self.num_gpus > 1:
-            assert device_type == "cuda", "Only CUDA supports multiple workers/GPUs. cpu|mps does not."
+            assert device_type in ("cuda", "npu"), "Only CUDA/NPU supports multiple workers/GPUs. cpu|mps does not."
 
         for gpu_id in range(self.num_gpus):
 
             if device_type == "cuda":
                 device = torch.device(f"cuda:{gpu_id}")
                 print(f"Loading model on GPU {gpu_id}...")
+            elif device_type == "npu":
+                device = torch.device(f"npu:{gpu_id}")
+                print(f"Loading model on NPU {gpu_id}...")
             else:
                 device = torch.device(device_type) # e.g. cpu|mps
                 print(f"Loading model on {device_type}...")

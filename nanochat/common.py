@@ -1,5 +1,7 @@
 """
 Common utilities for nanochat.
+
+Supports CUDA, NPU (Ascend), MPS, and CPU devices.
 """
 
 import os
@@ -9,6 +11,19 @@ import urllib.request
 import torch
 import torch.distributed as dist
 from filelock import FileLock
+
+# =============================================================================
+# NPU (Ascend) support detection
+# =============================================================================
+def _is_npu_available():
+    """Check if torch_npu is installed and NPU devices are available."""
+    try:
+        import torch_npu  # noqa: F401
+        return torch.npu.is_available()
+    except ImportError:
+        return False
+
+HAS_NPU = _is_npu_available()
 
 # The dtype used for compute (matmuls, activations). Master weights stay fp32 for optimizer precision.
 # Linear layers cast their weights to this dtype in forward, replacing torch.amp.autocast.
@@ -27,7 +42,10 @@ def _detect_compute_dtype():
         # fp16 training requires GradScaler (not yet implemented), so fall back to fp32.
         # Users can still force fp16 via NANOCHAT_DTYPE=float16 if they know what they're doing.
         return torch.float32, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (pre-Ampere, bf16 not supported, using fp32)"
-    return torch.float32, "auto-detected: no CUDA (CPU/MPS)"
+    if HAS_NPU:
+        # Ascend 910B natively supports BF16
+        return torch.bfloat16, "auto-detected: NPU (Ascend 910B, bf16 supported)"
+    return torch.float32, "auto-detected: no CUDA/NPU (CPU/MPS)"
 COMPUTE_DTYPE, COMPUTE_DTYPE_REASON = _detect_compute_dtype()
 
 class ColoredFormatter(logging.Formatter):
@@ -160,24 +178,28 @@ def get_dist_info():
         return False, 0, 0, 1
 
 def autodetect_device_type():
-    # prefer to use CUDA if available, otherwise use MPS, otherwise fallback on CPU
-    if torch.cuda.is_available():
+    # prefer to use NPU if available, then CUDA, then MPS, then fallback on CPU
+    if HAS_NPU:
+        device_type = "npu"
+    elif torch.cuda.is_available():
         device_type = "cuda"
-    elif torch.backends.mps.is_available():
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device_type = "mps"
     else:
         device_type = "cpu"
     print0(f"Autodetected device type: {device_type}")
     return device_type
 
-def compute_init(device_type="cuda"): # cuda|cpu|mps
+def compute_init(device_type="cuda"): # cuda|npu|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
-    assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
+    assert device_type in ["cuda", "npu", "mps", "cpu"], f"Invalid device type: {device_type}"
     if device_type == "cuda":
         assert torch.cuda.is_available(), "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
+    if device_type == "npu":
+        assert HAS_NPU, "torch_npu not installed or no NPU devices found, but device_type is 'npu'"
     if device_type == "mps":
-        assert torch.backends.mps.is_available(), "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
+        assert hasattr(torch.backends, 'mps') and torch.backends.mps.is_available(), "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
 
     # Reproducibility
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.
@@ -185,22 +207,30 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     torch.manual_seed(42)
     if device_type == "cuda":
         torch.cuda.manual_seed(42)
+    elif device_type == "npu":
+        torch.npu.manual_seed(42)
     # skipping full reproducibility for now, possibly investigate slowdown later
     # torch.use_deterministic_algorithms(True)
 
     # Precision
     if device_type == "cuda":
         torch.set_float32_matmul_precision("high") # uses tf32 instead of fp32 for matmuls, see https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
+    # NPU: Ascend 910B supports BF16 natively; no need for tf32-like setting
 
-    # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
+    # Distributed setup: Distributed Data Parallel (DDP), optional
     is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    if is_ddp_requested and device_type == "cuda":
-        device = torch.device("cuda", ddp_local_rank)
-        torch.cuda.set_device(device)  # make "cuda" default to this device
-        dist.init_process_group(backend="nccl", device_id=device)
+    if is_ddp_requested and device_type in ("cuda", "npu"):
+        if device_type == "cuda":
+            device = torch.device("cuda", ddp_local_rank)
+            torch.cuda.set_device(device)  # make "cuda" default to this device
+            dist.init_process_group(backend="nccl", device_id=device)
+        else:  # npu
+            device = torch.device("npu", ddp_local_rank)
+            torch.npu.set_device(device)  # make "npu" default to this device
+            dist.init_process_group(backend="hccl", device_id=device)
         dist.barrier()
     else:
-        device = torch.device(device_type) # mps|cpu
+        device = torch.device(device_type) # mps|cpu|npu(single)
 
     if ddp_rank == 0:
         logger.info(f"Distributed world size: {ddp_world_size}")
@@ -221,7 +251,46 @@ class DummyWandb:
     def finish(self):
         pass
 
-# hardcoded BF16 peak flops for various GPUs
+# =============================================================================
+# Device-agnostic helpers
+# =============================================================================
+
+def device_synchronize(device_type="cuda"):
+    """Synchronize the accelerator device."""
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device_type == "npu" and HAS_NPU:
+        torch.npu.synchronize()
+
+def device_max_memory_allocated(device_type="cuda"):
+    """Get peak memory allocated on the accelerator device."""
+    if device_type == "cuda" and torch.cuda.is_available():
+        return torch.cuda.max_memory_allocated()
+    elif device_type == "npu" and HAS_NPU:
+        return torch.npu.max_memory_allocated()
+    return 0
+
+def device_get_name(device_type="cuda", index=0):
+    """Get the name of the accelerator device."""
+    if device_type == "cuda" and torch.cuda.is_available():
+        return torch.cuda.get_device_name(index)
+    elif device_type == "npu" and HAS_NPU:
+        return torch.npu.get_device_name(index)
+    return "Unknown"
+
+def device_get_count(device_type="cuda"):
+    """Get the number of accelerator devices."""
+    if device_type == "cuda" and torch.cuda.is_available():
+        return torch.cuda.device_count()
+    elif device_type == "npu" and HAS_NPU:
+        return torch.npu.device_count()
+    return 0
+
+def use_accelerator(device_type="cuda"):
+    """Whether to use accelerator-specific optimizations (pin_memory, non_blocking, etc.)."""
+    return device_type in ("cuda", "npu")
+
+# hardcoded BF16 peak flops for various GPUs/NPUs
 # inspired by torchtitan: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
 # and PR: https://github.com/karpathy/nanochat/pull/147
 def get_peak_flops(device_name: str) -> float:
@@ -229,6 +298,12 @@ def get_peak_flops(device_name: str) -> float:
 
     # Table order matters: more specific patterns first.
     _PEAK_FLOPS_TABLE = (
+        # Huawei Ascend NPU
+        (["910b2"], 320e12),     # Ascend 910B2 (BF16 ~320 TFLOPS)
+        (["910b"], 320e12),      # Ascend 910B (BF16 ~320 TFLOPS)
+        (["ascend 910b"], 320e12),
+        (["910a"], 256e12),      # Ascend 910A (BF16 ~256 TFLOPS)
+        (["ascend 910"], 256e12),
         # NVIDIA Blackwell
         (["gb200"], 2.5e15),
         (["grace blackwell"], 2.5e15),

@@ -1,0 +1,44 @@
+# Conda environment for nanochat on Huawei Ascend 910B NPU
+#
+# Usage:
+#   conda env create -f environment_npu.yml
+#   conda activate nanochat-npu
+#
+# Prerequisites:
+#   - CANN toolkit installed (e.g. /usr/local/Ascend/ascend-toolkit)
+#   - Ascend driver and firmware installed
+#   - Source CANN env: source /usr/local/Ascend/ascend-toolkit/set_env.sh
+#
+# The torch_npu version must match your CANN version.
+# See: https://www.hiascend.com/document/detail/zh/Pytorch/600/configandinstg/instg/insg_0006.html
+
+name: nanochat-npu
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+      # Core ML - install PyTorch first, then torch_npu on top
+      - torch==2.1.0
+      - torch-npu>=2.1.0
+      # Data & Tokenization
+      - datasets>=4.0.0
+      - rustbpe>=0.1.0
+      - tiktoken>=0.11.0
+      - tokenizers>=0.22.0
+      # Web server
+      - fastapi>=0.117.1
+      - uvicorn>=0.36.0
+      # Monitoring & Logging
+      - wandb>=0.21.3
+      - psutil>=7.1.0
+      # Utils
+      - filelock
+      - pyarrow
+      - jinja2
+      - pyyaml
+      # Dev
+      - pytest>=8.0.0
+      - ipykernel>=7.1.0
