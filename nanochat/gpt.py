@@ -40,7 +40,12 @@ class GPTConfig:
 
 
 def norm(x):
-    return F.rms_norm(x, (x.size(-1),)) # note that this will run in bf16, seems ok
+    # F.rms_norm requires PyTorch 2.4+; provide fallback for older versions
+    if hasattr(F, 'rms_norm'):
+        return F.rms_norm(x, (x.size(-1),))
+    # Manual RMSNorm: x / sqrt(mean(x^2) + eps)
+    rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+    return x / rms
 
 class Linear(nn.Linear):
     """nn.Linear that casts weights to match input dtype in forward.
