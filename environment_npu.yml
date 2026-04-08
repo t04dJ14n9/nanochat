@@ -9,8 +9,19 @@
 #   - Ascend driver and firmware installed
 #   - Source CANN env: source /usr/local/Ascend/ascend-toolkit/set_env.sh
 #
-# The torch_npu version must match your CANN version.
+# The torch_npu version MUST match your CANN version exactly.
 # See: https://www.hiascend.com/document/detail/zh/Pytorch/600/configandinstg/instg/insg_0006.html
+#
+# Version compatibility (tested):
+#   CANN 8.0.RCx (e.g. 8.0.T13) → torch==2.1.0 + torch-npu==2.1.0.post10
+#   CANN 8.1.RCx               → torch==2.3.1 + torch-npu==2.3.1.postX
+#   CANN 8.x                   → torch==2.5.1 + torch-npu==2.5.1.postX
+#
+# If conda env create fails due to pip conflicts, install manually:
+#   conda create -n nanochat-npu python=3.9 pip
+#   conda activate nanochat-npu
+#   pip install torch==2.1.0 torch-npu==2.1.0.post10
+#   pip install datasets rustbpe tiktoken tokenizers fastapi uvicorn psutil filelock pyarrow jinja2 pyyaml pytest ipykernel
 
 name: nanochat-npu
 channels:
@@ -20,9 +31,10 @@ dependencies:
   - python=3.9
   - pip
   - pip:
-      # Core ML - install PyTorch first, then torch_npu on top
+      # Core ML - versions MUST match your CANN version (see table above)
+      # For CANN 8.0.T13 (8.0.RCx series):
       - torch==2.1.0
-      - torch-npu>=2.1.0
+      - torch-npu==2.1.0.post10
       # Data & Tokenization
       - datasets>=4.0.0
       - rustbpe>=0.1.0
@@ -32,7 +44,6 @@ dependencies:
       - fastapi>=0.117.1
       - uvicorn>=0.36.0
       # Monitoring & Logging
-      - wandb>=0.21.3
       - psutil>=7.1.0
       # Utils
       - filelock

@@ -11,6 +11,16 @@ source .venv/bin/activate
 # CPU/MPS version
 uv sync --extra cpu
 source .venv/bin/activate
+
+# NPU (Ascend 910B) version - uses conda instead of uv
+source /usr/local/Ascend/ascend-toolkit/set_env.sh  # Required every session
+conda env create -f environment_npu.yml
+conda activate nanochat-npu
+# Or manually if conda env create fails:
+#   conda create -n nanochat-npu python=3.9 pip -y
+#   conda activate nanochat-npu
+#   pip install torch==2.1.0 torch-npu==2.1.0.post10
+#   pip install datasets rustbpe tiktoken tokenizers fastapi uvicorn psutil filelock pyarrow jinja2 pyyaml pytest ipykernel
 ```
 
 ### Testing
@@ -30,6 +40,13 @@ python -m pytest tests/ -v -k "test_name"
 **Complete GPT-2 training pipeline (8×H100):**
 ```bash
 bash runs/speedrun.sh
+```
+
+**Complete GPT-2 training pipeline (16×Ascend 910B NPU):**
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+conda activate nanochat-npu
+bash runs/run_16x910B.sh
 ```
 
 **Custom training for different GPU setups:**

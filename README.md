@@ -100,6 +100,91 @@ The important thing to note is that nanochat is written and configured around on
 
 The script [runs/runcpu.sh](runs/runcpu.sh) shows a very simple example of running on CPU or Apple Silicon. It dramatically shrinks the LLM that is being trained to make things fit into a reasonable time interval of a few ten minutes of training. You will not get strong results in this way.
 
+## Running on Huawei Ascend NPU (910B)
+
+nanochat supports training on Huawei Ascend 910B NPUs via `torch_npu`. The full pipeline (tokenizer → pretraining → SFT → chat) is available in [runs/run_16x910B.sh](runs/run_16x910B.sh) for a 16×910B node.
+
+### Step 1: Source CANN Environment
+
+```bash
+# Required every session (or add to ~/.bashrc)
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+# Verify NPU is visible
+npu-smi info
+```
+
+### Step 2: Check CANN Version
+
+The `torch_npu` version must match your CANN version exactly:
+
+```bash
+cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg
+```
+
+| CANN Version | PyTorch | torch_npu |
+|---|---|---|
+| 8.0.RCx (e.g. 8.0.T13) | `2.1.0` | `2.1.0.post10` |
+| 8.1.RCx | `2.3.1` | `2.3.1.postX` |
+| 8.x | `2.5.1` | `2.5.1.postX` |
+
+Edit `environment_npu.yml` to match your CANN version before creating the env.
+
+### Step 3: Create Conda Environment
+
+```bash
+# Option A: From yml file (recommended)
+conda env create -f environment_npu.yml
+conda activate nanochat-npu
+
+# Option B: Manual installation (if conda env create fails)
+conda create -n nanochat-npu python=3.9 pip -y
+conda activate nanochat-npu
+# Adjust versions per the table above
+pip install torch==2.1.0 torch-npu==2.1.0.post10
+pip install datasets rustbpe tiktoken tokenizers fastapi uvicorn \
+    psutil filelock pyarrow jinja2 pyyaml pytest ipykernel
+```
+
+### Step 4: Verify NPU Integration
+
+```bash
+python -c "
+import torch
+import torch_npu
+print(f'PyTorch: {torch.__version__}, torch_npu: {torch_npu.__version__}')
+print(f'NPU available: {torch.npu.is_available()}, Count: {torch.npu.device_count()}')
+x = torch.randn(3, 3, device='npu:0')
+print(f'Tensor on: {x.device}')
+"
+```
+
+Expected output: `NPU available: True, Count: 16, Tensor on: npu:0`
+
+### Step 5: Train
+
+```bash
+# Full pipeline (recommended with screen)
+screen -L -Logfile runs/run_16x910B.log -S nanochat bash runs/run_16x910B.sh
+
+# Or step-by-step:
+torchrun --standalone --nproc_per_node=16 -m scripts.base_train \
+    --depth=24 --target-param-data-ratio=8 --device-batch-size=16 \
+    --window-pattern=L --run=910b
+```
+
+### Key Differences from CUDA
+
+| Feature | CUDA (H100) | NPU (910B) |
+|---------|-------------|------------|
+| Precision | BF16 + FP8 | **BF16 only** |
+| Attention | Flash Attention 3 | **SDPA fallback** |
+| Distributed backend | nccl | **hccl** |
+| `torch.compile` | Enabled | **Disabled** |
+| Sliding window | Supported | **Not supported** → use `--window-pattern=L` |
+| Batch size | 32+ | **16** (64GB HBM) |
+| wandb | Enabled | **Disabled** |
+
 ## Precision / dtype
 
 nanochat does not use `torch.amp.autocast`. Instead, precision is managed explicitly through a single global `COMPUTE_DTYPE` (defined in `nanochat/common.py`). By default this is auto-detected based on your hardware:
@@ -108,6 +193,7 @@ nanochat does not use `torch.amp.autocast`. Instead, precision is managed explic
 |----------|--------------|-----|
 | CUDA SM 80+ (A100, H100, ...) | `bfloat16` | Native bf16 tensor cores |
 | CUDA SM < 80 (V100, T4, ...) | `float32` | No bf16; fp16 available via `NANOCHAT_DTYPE=float16` (uses GradScaler) |
+| Ascend NPU (910B) | `bfloat16` | Native bf16 on 910B; no FP8 support |
 | CPU / MPS | `float32` | No reduced-precision tensor cores |
 
 You can override the default with the `NANOCHAT_DTYPE` environment variable:
@@ -158,9 +244,11 @@ I've published a number of guides that might contain helpful information, most r
 │   ├── report.py                   # Utilities for writing the nanochat Report
 │   ├── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
 │   └── ui.html                     # HTML/CSS/JS for nanochat frontend
+├── environment_npu.yml             # Conda env for Ascend NPU
 ├── pyproject.toml
 ├── runs
 │   ├── miniseries.sh               # Miniseries training script
+│   ├── run_16x910B.sh              # Train on 16×Ascend 910B NPUs
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
 │   ├── scaling_laws.sh             # Scaling laws experiments
 │   └── speedrun.sh                 # Train the ~$100 nanochat d20

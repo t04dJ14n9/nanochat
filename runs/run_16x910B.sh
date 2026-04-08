@@ -4,13 +4,20 @@
 # Each NPU has 64GB HBM, total 1TB aggregate memory
 #
 # Prerequisites:
-#   1. Install CANN toolkit and source env:
+#   1. Install CANN toolkit (e.g. 8.0.T13) and source env:
 #      source /usr/local/Ascend/ascend-toolkit/set_env.sh
-#   2. Create and activate conda environment:
+#      (Add to ~/.bashrc to auto-load on every session)
+#   2. Check your CANN version and update environment_npu.yml accordingly:
+#      cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg
+#      CANN 8.0.RCx → torch==2.1.0 + torch-npu==2.1.0.post10
+#      CANN 8.1.RCx → torch==2.3.1 + torch-npu==2.3.1.postX
+#   3. Create and activate conda environment:
 #      conda env create -f environment_npu.yml
 #      conda activate nanochat-npu
-#   3. Verify NPU visibility:
+#   4. Verify NPU visibility:
 #      npu-smi info
+#   5. Verify NPU + PyTorch integration:
+#      python -c "import torch; import torch_npu; print(torch.npu.is_available(), torch.npu.device_count())"
 #
 # Usage:
 #   # Simplest launch:
@@ -19,27 +26,21 @@
 #   # Recommended: use screen to persist across SSH disconnects
 #   screen -L -Logfile runs/run_16x910B.log -S nanochat bash runs/run_16x910B.sh
 #
-#   # With wandb logging:
-#   WANDB_RUN=nanochat-910b bash runs/run_16x910B.sh
-
 set -e
+
+# Ensure CANN environment is sourced (skip if already loaded)
+if [ -z "$ASCEND_HOME_PATH" ] && [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    echo "Sourced CANN environment from /usr/local/Ascend/ascend-toolkit/set_env.sh"
+fi
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
-# wandb setup
-# Set WANDB_MODE=disabled to completely disable wandb logging
-# If you wish to use wandb for logging, uncomment the following lines:
-# 1) Make sure to first log in to wandb, e.g. run:
-#    `wandb login`
-# 2) Set the WANDB_RUN environment variable when running this script, e.g.:
-#    `WANDB_RUN=nanochat-910b bash runs/run_16x910B.sh`
+# Disable wandb (not included in NPU environment)
 export WANDB_MODE=disabled
-# if [ -z "$WANDB_RUN" ]; then
-#     WANDB_RUN=dummy
-# fi
 
 # Skip torch.compile on NPU by default (set to 1 to enable, experimental)
 export NANOCHAT_COMPILE=0
@@ -79,7 +80,7 @@ wait $DATASET_DOWNLOAD_PID
 # - --window-pattern=L (NPU SDPA doesn't support sliding window, use full context)
 # - Uses hccl backend for distributed training (handled automatically by compute_init)
 # - torch.compile is disabled by default on NPU (set NANOCHAT_COMPILE=1 to enable)
-torchrun --standalone --nproc_per_node=16 -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --window-pattern=L --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=16 -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --window-pattern=L --run=910b
 
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
 torchrun --standalone --nproc_per_node=16 -m scripts.base_eval -- --device-batch-size=16
@@ -91,7 +92,7 @@ torchrun --standalone --nproc_per_node=16 -m scripts.base_eval -- --device-batch
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run SFT and eval the model
-torchrun --standalone --nproc_per_node=16 -m scripts.chat_sft -- --device-batch-size=16 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=16 -m scripts.chat_sft -- --device-batch-size=16 --run=910b_sft
 torchrun --standalone --nproc_per_node=16 -m scripts.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
