@@ -160,9 +160,12 @@ Generated: {timestamp}
     if gpu_info.get("available"):
         gpu_names = ", ".join(set(gpu_info["names"]))
         total_vram = sum(gpu_info["memory_gb"])
+        device_type = gpu_info.get("device_type", "cuda")
+        version_key = "cann_version" if device_type == "npu" else "cuda_version"
+        version_label = "CANN Version" if device_type == "npu" else "CUDA Version"
         header += f"""- GPUs: {gpu_info['count']}x {gpu_names}
 - GPU Memory: {total_vram:.1f} GB total
-- CUDA Version: {gpu_info['cuda_version']}
+- {version_label}: {gpu_info.get(version_key, 'unknown')}
 """
     else:
         header += "- GPUs: None available\n"
