@@ -21,7 +21,10 @@ import argparse
 from dataclasses import asdict
 from contextlib import contextmanager
 
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import torch
 import torch.distributed as dist
 
@@ -96,7 +99,7 @@ else:
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
+use_dummy_wandb = args.run == "dummy" or not master_process or wandb is None
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
 
 # Flash Attention status
