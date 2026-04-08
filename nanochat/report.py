@@ -60,6 +60,7 @@ def get_gpu_info():
         info["device_type"] = "cuda"
         return info
     elif HAS_NPU:
+        import torch_npu
         num_devices = torch.npu.device_count()
         info = {
             "available": True,
