@@ -223,11 +223,11 @@ def compute_init(device_type="cuda"): # cuda|npu|cpu|mps
         if device_type == "cuda":
             device = torch.device("cuda", ddp_local_rank)
             torch.cuda.set_device(device)  # make "cuda" default to this device
-            dist.init_process_group(backend="nccl", device_id=device)
+            # device_id parameter added in PyTorch 2.2+, not available in 2.1.0
+            dist.init_process_group(backend="nccl")
         else:  # npu
             device = torch.device("npu", ddp_local_rank)
             torch.npu.set_device(device)  # make "npu" default to this device
-            # device_id parameter added in PyTorch 2.2+, not available in 2.1.0
             dist.init_process_group(backend="hccl")
         dist.barrier()
     else:
