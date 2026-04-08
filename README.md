@@ -139,6 +139,10 @@ conda activate nanochat-npu
 
 # Install all deps via pip (edit requirements_npu.txt if your CANN version differs)
 pip install -r requirements_npu.txt
+
+# If you already have torch+cpu installed, force reinstall to get the right torch:
+# pip install --force-reinstall torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+# pip install torch-npu==2.1.0.post10
 ```
 
 ### Step 4: Verify NPU Integration

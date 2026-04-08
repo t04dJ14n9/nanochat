@@ -39,4 +39,4 @@ pyyaml
 
 # Dev
 pytest>=8.0.0
-ipykernel>=7.1.0
+ipykernel>=6.29.0
