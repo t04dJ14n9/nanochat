@@ -1,0 +1,42 @@
+# NPU (Ascend 910B) pip requirements for nanochat
+#
+# Prerequisites:
+#   1. Source CANN environment: source /usr/local/Ascend/ascend-toolkit/set_env.sh
+#   2. Create conda env: conda create -n nanochat-npu python=3.9 -y
+#   3. Activate: conda activate nanochat-npu
+#   4. Install: pip install -r requirements_npu.txt
+#
+# The torch_npu version MUST match your CANN version exactly.
+# See: https://www.hiascend.com/document/detail/zh/Pytorch/600/configandinstg/instg/insg_0006.html
+#
+# Version compatibility:
+#   CANN 8.0.RCx (e.g. 8.0.T13) → torch==2.1.0 + torch-npu==2.1.0.post10  (CURRENT)
+#   CANN 8.1.RCx               → torch==2.3.1 + torch-npu==2.3.1.postX
+#   CANN 8.x                   → torch==2.5.1 + torch-npu==2.5.1.postX
+
+# Core ML - MUST match your CANN version (see table above)
+torch==2.1.0
+torch-npu==2.1.0.post10
+
+# Data & Tokenization
+datasets>=4.0.0
+rustbpe>=0.1.0
+tiktoken>=0.11.0
+tokenizers>=0.22.0
+
+# Web server
+fastapi>=0.117.1
+uvicorn>=0.36.0
+
+# Monitoring & Logging
+psutil>=7.1.0
+
+# Utils
+filelock
+pyarrow
+jinja2
+pyyaml
+
+# Dev
+pytest>=8.0.0
+ipykernel>=7.1.0

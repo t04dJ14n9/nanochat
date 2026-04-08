@@ -133,17 +133,12 @@ Edit `environment_npu.yml` to match your CANN version before creating the env.
 ### Step 3: Create Conda Environment
 
 ```bash
-# Option A: From yml file (recommended)
-conda env create -f environment_npu.yml
+# Create conda env with Python only (avoids slow repodata resolve)
+conda create -n nanochat-npu python=3.9 -y
 conda activate nanochat-npu
 
-# Option B: Manual installation (if conda env create fails)
-conda create -n nanochat-npu python=3.9 pip -y
-conda activate nanochat-npu
-# Adjust versions per the table above
-pip install torch==2.1.0 torch-npu==2.1.0.post10
-pip install datasets rustbpe tiktoken tokenizers fastapi uvicorn \
-    psutil filelock pyarrow jinja2 pyyaml pytest ipykernel
+# Install all deps via pip (edit requirements_npu.txt if your CANN version differs)
+pip install -r requirements_npu.txt
 ```
 
 ### Step 4: Verify NPU Integration

@@ -12,15 +12,11 @@ source .venv/bin/activate
 uv sync --extra cpu
 source .venv/bin/activate
 
-# NPU (Ascend 910B) version - uses conda instead of uv
+# NPU (Ascend 910B) version - uses conda + pip instead of uv
 source /usr/local/Ascend/ascend-toolkit/set_env.sh  # Required every session
-conda env create -f environment_npu.yml
+conda create -n nanochat-npu python=3.9 -y
 conda activate nanochat-npu
-# Or manually if conda env create fails:
-#   conda create -n nanochat-npu python=3.9 pip -y
-#   conda activate nanochat-npu
-#   pip install torch==2.1.0 torch-npu==2.1.0.post10
-#   pip install datasets rustbpe tiktoken tokenizers fastapi uvicorn psutil filelock pyarrow jinja2 pyyaml pytest ipykernel
+pip install -r requirements_npu.txt
 ```
 
 ### Testing

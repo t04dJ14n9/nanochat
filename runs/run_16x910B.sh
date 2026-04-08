@@ -12,8 +12,9 @@
 #      CANN 8.0.RCx → torch==2.1.0 + torch-npu==2.1.0.post10
 #      CANN 8.1.RCx → torch==2.3.1 + torch-npu==2.3.1.postX
 #   3. Create and activate conda environment:
-#      conda env create -f environment_npu.yml
+#      conda create -n nanochat-npu python=3.9 -y
 #      conda activate nanochat-npu
+#      pip install -r requirements_npu.txt
 #   4. Verify NPU visibility:
 #      npu-smi info
 #   5. Verify NPU + PyTorch integration:

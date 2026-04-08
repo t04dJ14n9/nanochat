@@ -1,8 +1,13 @@
 # Conda environment for nanochat on Huawei Ascend 910B NPU
 #
-# Usage:
-#   conda env create -f environment_npu.yml
+# NOTE: conda env create with mixed pip deps can hang on repodata resolve.
+# Use the recommended conda + pip approach below instead.
+#
+# Recommended setup:
+#   source /usr/local/Ascend/ascend-toolkit/set_env.sh
+#   conda create -n nanochat-npu python=3.9 -y
 #   conda activate nanochat-npu
+#   pip install -r requirements_npu.txt
 #
 # Prerequisites:
 #   - CANN toolkit installed (e.g. /usr/local/Ascend/ascend-toolkit)
@@ -10,46 +15,10 @@
 #   - Source CANN env: source /usr/local/Ascend/ascend-toolkit/set_env.sh
 #
 # The torch_npu version MUST match your CANN version exactly.
+# Edit requirements_npu.txt before pip install if your CANN version differs.
 # See: https://www.hiascend.com/document/detail/zh/Pytorch/600/configandinstg/instg/insg_0006.html
 #
-# Version compatibility (tested):
+# Version compatibility:
 #   CANN 8.0.RCx (e.g. 8.0.T13) → torch==2.1.0 + torch-npu==2.1.0.post10
 #   CANN 8.1.RCx               → torch==2.3.1 + torch-npu==2.3.1.postX
 #   CANN 8.x                   → torch==2.5.1 + torch-npu==2.5.1.postX
-#
-# If conda env create fails due to pip conflicts, install manually:
-#   conda create -n nanochat-npu python=3.9 pip
-#   conda activate nanochat-npu
-#   pip install torch==2.1.0 torch-npu==2.1.0.post10
-#   pip install datasets rustbpe tiktoken tokenizers fastapi uvicorn psutil filelock pyarrow jinja2 pyyaml pytest ipykernel
-
-name: nanochat-npu
-channels:
-  - defaults
-  - conda-forge
-dependencies:
-  - python=3.9
-  - pip
-  - pip:
-      # Core ML - versions MUST match your CANN version (see table above)
-      # For CANN 8.0.T13 (8.0.RCx series):
-      - torch==2.1.0
-      - torch-npu==2.1.0.post10
-      # Data & Tokenization
-      - datasets>=4.0.0
-      - rustbpe>=0.1.0
-      - tiktoken>=0.11.0
-      - tokenizers>=0.22.0
-      # Web server
-      - fastapi>=0.117.1
-      - uvicorn>=0.36.0
-      # Monitoring & Logging
-      - psutil>=7.1.0
-      # Utils
-      - filelock
-      - pyarrow
-      - jinja2
-      - pyyaml
-      # Dev
-      - pytest>=8.0.0
-      - ipykernel>=7.1.0
