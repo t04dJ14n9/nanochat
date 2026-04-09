@@ -77,14 +77,14 @@ wait $DATASET_DOWNLOAD_PID
 # d24 model on 16×910B NPUs
 # NPU-specific modifications:
 # - No --fp8 flag (910B does not support FP8 training)
-# - --device-batch-size=16 (64GB HBM per NPU can handle larger batches)
+# - --device-batch-size=8 (61GB usable HBM per NPU; batch_size=16 causes OOM)
 # - --window-pattern=L (NPU SDPA doesn't support sliding window, use full context)
 # - Uses hccl backend for distributed training (handled automatically by compute_init)
 # - torch.compile is disabled by default on NPU (set NANOCHAT_COMPILE=1 to enable)
-torchrun --standalone --nproc_per_node=16 -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --window-pattern=L --run=910b
+torchrun --standalone --nproc_per_node=16 -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=8 --window-pattern=L --run=910b
 
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-torchrun --standalone --nproc_per_node=16 -m scripts.base_eval -- --device-batch-size=16
+torchrun --standalone --nproc_per_node=16 -m scripts.base_eval -- --device-batch-size=8
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
@@ -93,7 +93,7 @@ torchrun --standalone --nproc_per_node=16 -m scripts.base_eval -- --device-batch
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run SFT and eval the model
-torchrun --standalone --nproc_per_node=16 -m scripts.chat_sft -- --device-batch-size=16 --run=910b_sft
+torchrun --standalone --nproc_per_node=16 -m scripts.chat_sft -- --device-batch-size=8 --run=910b_sft
 torchrun --standalone --nproc_per_node=16 -m scripts.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
