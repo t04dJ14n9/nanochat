@@ -474,7 +474,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
                 future = dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future()
                 gather_list.append(dict(future=future, params=None))
 
-    def _compute_muon(self, group: dict, info: dict, gather_list: list, rank: int) -> None:
+    def _compute_muon(self, group: dict, info: dict, gather_list: list, rank: int, world_size: int) -> None:
         """Wait for reduce, compute Muon updates, launch gather."""
         info['future'].wait()
         info['grad_chunk'].div_(world_size)  # Manual AVG: SUM / world_size (HCCL compat)
@@ -554,7 +554,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
             if group['kind'] == 'adamw':
                 self._compute_adamw(group, info, gather_list, rank, world_size)
             elif group['kind'] == 'muon':
-                self._compute_muon(group, info, gather_list, rank)
+                self._compute_muon(group, info, gather_list, rank, world_size)
             else:
                 raise ValueError(f"Unknown optimizer kind: {group['kind']}")
 
