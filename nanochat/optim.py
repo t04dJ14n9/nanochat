@@ -375,14 +375,16 @@ class DistMuonAdamW(torch.optim.Optimizer):
             grad = p.grad
             if p.numel() < 1024:
                 # Small params: all_reduce (no scatter/gather needed)
-                future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
+                # Use SUM + manual division instead of AVG for HCCL compatibility
+                future = dist.all_reduce(grad, op=dist.ReduceOp.SUM, async_op=True).get_future()
                 param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
             else:
                 # Large params: reduce_scatter
                 assert grad.shape[0] % world_size == 0, f"AdamW reduce_scatter requires shape[0] ({grad.shape[0]}) divisible by world_size ({world_size})"
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
-                future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
+                # Use SUM + manual division instead of AVG for HCCL compatibility
+                future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.SUM, async_op=True).get_future()
                 param_infos[p] = dict(future=future, grad_slice=grad_slice, is_small=False)
         return dict(param_infos=param_infos)
 
@@ -403,7 +405,8 @@ class DistMuonAdamW(torch.optim.Optimizer):
 
         # Reduce_scatter to get this rank's chunk
         grad_chunk = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
-        future = dist.reduce_scatter_tensor(grad_chunk, stacked_grads, op=dist.ReduceOp.AVG, async_op=True).get_future()
+        # Use SUM + manual division instead of AVG for HCCL compatibility
+        future = dist.reduce_scatter_tensor(grad_chunk, stacked_grads, op=dist.ReduceOp.SUM, async_op=True).get_future()
 
         return dict(future=future, grad_chunk=grad_chunk, stacked_grads=stacked_grads, chunk_size=chunk_size)
 
@@ -414,6 +417,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
             pinfo = param_infos[p]
             pinfo['future'].wait()
             grad_slice = pinfo['grad_slice']
+            grad_slice.div_(world_size)  # Manual AVG: SUM / world_size (HCCL compat)
             state = self.state[p]
 
             # For small params, operate on full param; for large, operate on slice
@@ -451,6 +455,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
     def _compute_muon(self, group: dict, info: dict, gather_list: list, rank: int) -> None:
         """Wait for reduce, compute Muon updates, launch gather."""
         info['future'].wait()
+        info['grad_chunk'].div_(world_size)  # Manual AVG: SUM / world_size (HCCL compat)
         params = group['params']
         chunk_size = info['chunk_size']
         grad_chunk = info['grad_chunk']
