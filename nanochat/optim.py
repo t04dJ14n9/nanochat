@@ -50,18 +50,26 @@ def adamw_step_fused(
     All in one compiled graph to eliminate Python overhead between ops.
     The 0-D CPU tensors avoid recompilation when hyperparameter values change.
     """
+    # Move scalar tensors onto the parameter device for eager NPU execution.
+    lr = lr_t.to(device=p.device, dtype=p.dtype)
+    wd = wd_t.to(device=p.device, dtype=p.dtype)
+    beta1 = beta1_t.to(device=exp_avg.device, dtype=exp_avg.dtype)
+    beta2 = beta2_t.to(device=exp_avg_sq.device, dtype=exp_avg_sq.dtype)
+    eps = eps_t.to(device=exp_avg_sq.device, dtype=exp_avg_sq.dtype)
+    step = step_t.to(device=exp_avg.device, dtype=exp_avg.dtype)
+
     # Weight decay (decoupled, applied before the update)
-    p.mul_(1 - lr_t * wd_t)
+    p.mul_(1 - lr * wd)
     # Update running averages (lerp_ is cleaner and fuses well)
-    exp_avg.lerp_(grad, 1 - beta1_t)
-    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
+    exp_avg.lerp_(grad, 1 - beta1)
+    exp_avg_sq.lerp_(grad.square(), 1 - beta2)
     # Bias corrections
-    bias1 = 1 - beta1_t ** step_t
-    bias2 = 1 - beta2_t ** step_t
+    bias1 = 1 - beta1 ** step
+    bias2 = 1 - beta2 ** step
     # Compute update and apply
-    denom = (exp_avg_sq / bias2).sqrt() + eps_t
-    step_size = lr_t / bias1
-    p.add_(exp_avg / denom, alpha=-step_size)
+    denom = (exp_avg_sq / bias2).sqrt() + eps
+    step_size = lr / bias1
+    p.sub_(step_size * (exp_avg / denom))
 
 # -----------------------------------------------------------------------------
 """
@@ -122,7 +130,7 @@ def muon_step_fused(
     """
 
     # Nesterov momentum
-    momentum = momentum_t.to(stacked_grads.dtype)
+    momentum = momentum_t.to(device=stacked_grads.device, dtype=stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
 
@@ -143,7 +151,7 @@ def muon_step_fused(
     g = X
 
     # Variance reduction
-    beta2 = beta2_t.to(g.dtype)
+    beta2 = beta2_t.to(device=g.device, dtype=g.dtype)
     v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
     red_dim_size = g.size(red_dim)
     v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
@@ -156,8 +164,8 @@ def muon_step_fused(
     g = g * final_scale.to(g.dtype)
 
     # Cautious weight decay + parameter update
-    lr = lr_t.to(g.dtype)
-    wd = wd_t.to(g.dtype)
+    lr = lr_t.to(device=g.device, dtype=g.dtype)
+    wd = wd_t.to(device=g.device, dtype=g.dtype)
     mask = (g * stacked_params) >= 0
     stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
 
