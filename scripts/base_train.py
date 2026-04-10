@@ -79,6 +79,7 @@ parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints
 # Parallelism
 parser.add_argument("--parallelism", type=str, default="ddp", choices=["ddp", "fsdp"], help="parallelism strategy: ddp (custom ZeRO-2 optimizer sharding) or fsdp (PyTorch FSDP parameter sharding)")
 parser.add_argument("--fsdp-sharding", type=str, default="full", choices=["full", "shard_grad_op"], help="FSDP sharding strategy: full (ZeRO-3, shard params+grads+optim) or shard_grad_op (ZeRO-2, shard grads+optim only)")
+parser.add_argument("--no-compile", action="store_true", help="disable torch.compile (recommended with FSDP to avoid slow recompilation during eval)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
@@ -263,7 +264,11 @@ if use_fsdp:
     orig_model = model  # FSDP model is the reference now
 
 # Compile for speed (both DDP and FSDP paths benefit from this)
-model = torch.compile(model, dynamic=False)
+# Note: With FSDP, torch.compile can cause very slow recompilation when eval
+# uses different call signatures (e.g. loss_reduction='none'). Use --no-compile
+# if you encounter long compilation stalls during evaluation.
+if not args.no_compile:
+    model = torch.compile(model, dynamic=False)
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.

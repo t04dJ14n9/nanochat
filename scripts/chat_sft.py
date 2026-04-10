@@ -70,6 +70,7 @@ parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epoch
 # Parallelism
 parser.add_argument("--parallelism", type=str, default="ddp", choices=["ddp", "fsdp"], help="parallelism strategy: ddp (custom ZeRO-2 optimizer sharding) or fsdp (PyTorch FSDP parameter sharding)")
 parser.add_argument("--fsdp-sharding", type=str, default="full", choices=["full", "shard_grad_op"], help="FSDP sharding strategy: full (ZeRO-3) or shard_grad_op (ZeRO-2)")
+parser.add_argument("--no-compile", action="store_true", help="disable torch.compile (recommended with FSDP to avoid slow recompilation during eval)")
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -131,7 +132,8 @@ for name, fallback, source in [
         print0(f"Using {name}={arg_val}")
 
 orig_model = model
-model = torch.compile(model, dynamic=False)
+if not args.no_compile:
+    model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
