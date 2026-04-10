@@ -26,6 +26,7 @@ Architecture:
 """
 
 import os
+import functools
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import (
@@ -48,11 +49,11 @@ def get_fsdp_wrap_policy():
     granularity: each block's parameters are sharded together, and
     all-gather happens once per block during forward/backward.
 
-    Alternatives considered:
-    - size_based_auto_wrap_policy: wraps by parameter count, less predictable
-    - Manual wrapping: more control but more code to maintain
+    transformer_auto_wrap_policy is a callable that FSDP invokes as:
+        policy_fn(module, recurse, nonwrapped_numel) -> bool
+    We use functools.partial to pre-bind the transformer_layer_cls argument.
     """
-    return transformer_auto_wrap_policy(transformer_layer_cls={Block})
+    return functools.partial(transformer_auto_wrap_policy, transformer_layer_cls={Block})
 
 
 def get_fsdp_mixed_precision():
