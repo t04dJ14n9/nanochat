@@ -112,6 +112,14 @@ def wrap_model_fsdp(model, device, sharding_strategy="full"):
     mixed_precision = get_fsdp_mixed_precision()
     wrap_policy = get_fsdp_wrap_policy()
 
+    # FSDP requires uniform dtype within each flat param group.
+    # nanochat's init_weights() casts embeddings to bf16 while keeping other
+    # params in fp32. We must unify to fp32 before wrapping — MixedPrecision
+    # will handle bf16 compute during forward/backward.
+    for param in model.parameters():
+        if param.dtype != torch.float32:
+            param.data = param.data.float()
+
     # When using FSDP, we need to make sure the model is on the correct device
     # before wrapping. The wrapping process will shard parameters.
     fsdp_model = FSDP(
