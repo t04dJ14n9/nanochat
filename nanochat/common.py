@@ -246,6 +246,7 @@ def get_peak_flops(device_name: str) -> float:
         # NVIDIA Ampere data center
         (["a100"], 312e12),
         (["a800"], 312e12),
+        (["a10"], 125e12),     # A10: 125 TFLOPS BF16 (SM 86, 72 SMs, 1695 MHz)
         (["a40"], 149.7e12),
         (["a30"], 165e12),
         # NVIDIA Ada data center

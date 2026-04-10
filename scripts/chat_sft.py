@@ -23,6 +23,7 @@ from nanochat.loss_eval import evaluate_bpb
 import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
 from nanochat.engine import Engine
+from nanochat.optim import MuonAdamW
 from scripts.chat_eval import run_chat_eval
 
 from tasks.common import TaskMixture
@@ -66,6 +67,9 @@ parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max pro
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
+# Parallelism
+parser.add_argument("--parallelism", type=str, default="ddp", choices=["ddp", "fsdp"], help="parallelism strategy: ddp (custom ZeRO-2 optimizer sharding) or fsdp (PyTorch FSDP parameter sharding)")
+parser.add_argument("--fsdp-sharding", type=str, default="full", choices=["full", "shard_grad_op"], help="FSDP sharding strategy: full (ZeRO-3) or shard_grad_op (ZeRO-2)")
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -94,6 +98,16 @@ if not HAS_FA3:
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+
+# Determine parallelism strategy
+use_fsdp = args.parallelism == "fsdp" and ddp  # FSDP only makes sense in distributed mode
+if use_fsdp:
+    print0(f"Using FSDP parallelism (sharding_strategy={args.fsdp_sharding})")
+
+# Wrap with FSDP if requested (must happen before torch.compile and optimizer init)
+if use_fsdp:
+    from nanochat.fsdp_utils import wrap_model_fsdp, save_fsdp_checkpoint
+    model = wrap_model_fsdp(model, device, sharding_strategy=args.fsdp_sharding)
 
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
@@ -131,7 +145,14 @@ token_bytes = get_token_bytes(device=device)
 
 # Initialize the Optimizer (combined MuonAdamW: Muon for matrix params, AdamW for rest)
 # Note that pretraining ramps weight_decay to zero by end of pretraining, so SFT continues with zero
-optimizer = model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr, matrix_lr=args.matrix_lr, weight_decay=0.0)
+if use_fsdp:
+    # FSDP handles gradient sync, use single-GPU MuonAdamW
+    optimizer = MuonAdamW(model.setup_optimizer_param_groups(
+        unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr,
+        matrix_lr=args.matrix_lr, weight_decay=0.0,
+    ))
+else:
+    optimizer = model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr, matrix_lr=args.matrix_lr, weight_decay=0.0)
 
 # Optionally warm-start optimizer from pretrained checkpoint (momentum buffers etc.)
 # Note: load_state_dict overwrites param_group metadata (LRs, betas, etc.) with the
@@ -399,27 +420,48 @@ while True:
     if last_step:
         output_dirname = args.model_tag if args.model_tag else f"d{depth}" # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
-        save_checkpoint(
-            checkpoint_dir,
-            step,
-            orig_model.state_dict(),
-            optimizer.state_dict(),
-            {
-                "step": step,
-                "val_bpb": val_bpb, # loss at last step
-                "model_config": {
-                    "sequence_len": args.max_seq_len,
-                    "vocab_size": tokenizer.get_vocab_size(),
-                    "n_layer": depth,
-                    "n_head": model.config.n_head,
-                    "n_kv_head": model.config.n_kv_head,
-                    "n_embd": model.config.n_embd,
-                    "window_pattern": model.config.window_pattern,
+        if use_fsdp:
+            save_fsdp_checkpoint(
+                orig_model, optimizer,
+                checkpoint_dir, step,
+                {
+                    "step": step,
+                    "val_bpb": val_bpb,
+                    "model_config": {
+                        "sequence_len": args.max_seq_len,
+                        "vocab_size": tokenizer.get_vocab_size(),
+                        "n_layer": depth,
+                        "n_head": model.config.n_head,
+                        "n_kv_head": model.config.n_kv_head,
+                        "n_embd": model.config.n_embd,
+                        "window_pattern": model.config.window_pattern,
+                    },
+                    "user_config": user_config,
                 },
-                "user_config": user_config, # inputs to the training script
-            },
-            rank=ddp_rank,
-        )
+                rank=ddp_rank,
+            )
+        else:
+            save_checkpoint(
+                checkpoint_dir,
+                step,
+                orig_model.state_dict(),
+                optimizer.state_dict(),
+                {
+                    "step": step,
+                    "val_bpb": val_bpb, # loss at last step
+                    "model_config": {
+                        "sequence_len": args.max_seq_len,
+                        "vocab_size": tokenizer.get_vocab_size(),
+                        "n_layer": depth,
+                        "n_head": model.config.n_head,
+                        "n_kv_head": model.config.n_kv_head,
+                        "n_embd": model.config.n_embd,
+                        "window_pattern": model.config.window_pattern,
+                    },
+                    "user_config": user_config, # inputs to the training script
+                },
+                rank=ddp_rank,
+            )
 
     if last_step:
         break

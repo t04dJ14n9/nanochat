@@ -33,6 +33,7 @@ from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
+from nanochat.optim import MuonAdamW, DistMuonAdamW
 from scripts.base_eval import evaluate_core
 print_banner()
 
@@ -75,6 +76,9 @@ parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluat
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
+# Parallelism
+parser.add_argument("--parallelism", type=str, default="ddp", choices=["ddp", "fsdp"], help="parallelism strategy: ddp (custom ZeRO-2 optimizer sharding) or fsdp (PyTorch FSDP parameter sharding)")
+parser.add_argument("--fsdp-sharding", type=str, default="full", choices=["full", "shard_grad_op"], help="FSDP sharding strategy: full (ZeRO-3, shard params+grads+optim) or shard_grad_op (ZeRO-2, shard grads+optim only)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
@@ -149,6 +153,11 @@ model_config_kwargs = asdict(model_config)
 print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
 model.to_empty(device=device) # 2) All tensors get storage on target device but with uninitialized (garbage) data
 model.init_weights() # 3) All tensors get initialized
+
+# Determine parallelism strategy
+use_fsdp = args.parallelism == "fsdp" and ddp  # FSDP only makes sense in distributed mode
+if use_fsdp:
+    print0(f"Using FSDP parallelism (sharding_strategy={args.fsdp_sharding})")
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
@@ -240,10 +249,21 @@ def disable_fp8(model):
             setattr(parent, attr_name, fp8_module)
 
 # -----------------------------------------------------------------------------
-# Compile the model
+# Wrap with FSDP (if requested) and compile the model
 
-orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+# Save a reference to the original uncompiled model for inference/evaluation
+orig_model = model
+
+if use_fsdp:
+    # FSDP wrapping must happen BEFORE torch.compile.
+    # With use_orig_params=True, FSDP preserves original parameter objects,
+    # so our custom MuonAdamW optimizer can still access them for grouping.
+    from nanochat.fsdp_utils import wrap_model_fsdp, save_fsdp_checkpoint
+    model = wrap_model_fsdp(model, device, sharding_strategy=args.fsdp_sharding)
+    orig_model = model  # FSDP model is the reference now
+
+# Compile for speed (both DDP and FSDP paths benefit from this)
+model = torch.compile(model, dynamic=False)
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.
@@ -305,15 +325,26 @@ if weight_decay_scaled != args.weight_decay:
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer (combined MuonAdamW: Muon for matrix params, AdamW for rest)
-optimizer = model.setup_optimizer(
-    # AdamW hyperparameters
-    unembedding_lr=args.unembedding_lr * batch_lr_scale,
-    embedding_lr=args.embedding_lr * batch_lr_scale,
-    scalar_lr=args.scalar_lr * batch_lr_scale,
-    # Muon hyperparameters
-    matrix_lr=args.matrix_lr * batch_lr_scale,
-    weight_decay=weight_decay_scaled,
-)
+# When using FSDP, we use the single-GPU MuonAdamW because FSDP handles gradient sync.
+# When using DDP (default), we use DistMuonAdamW which has built-in ZeRO-2 sharding.
+if use_fsdp:
+    # FSDP handles gradient synchronization, so we use single-GPU MuonAdamW
+    optimizer = MuonAdamW(model.setup_optimizer_param_groups(
+        unembedding_lr=args.unembedding_lr * batch_lr_scale,
+        embedding_lr=args.embedding_lr * batch_lr_scale,
+        scalar_lr=args.scalar_lr * batch_lr_scale,
+        matrix_lr=args.matrix_lr * batch_lr_scale,
+        weight_decay=weight_decay_scaled,
+    ))
+else:
+    # Default path: DistMuonAdamW handles gradient sync + ZeRO-2 optimizer sharding
+    optimizer = model.setup_optimizer(
+        unembedding_lr=args.unembedding_lr * batch_lr_scale,
+        embedding_lr=args.embedding_lr * batch_lr_scale,
+        scalar_lr=args.scalar_lr * batch_lr_scale,
+        matrix_lr=args.matrix_lr * batch_lr_scale,
+        weight_decay=weight_decay_scaled,
+    )
 
 if resuming:
     optimizer.load_state_dict(optimizer_data)
@@ -422,8 +453,11 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        with disable_fp8(model):
+        if use_fsdp or not args.fp8:
             val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        else:
+            with disable_fp8(model):
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -441,15 +475,21 @@ while True:
     results = {}
     if args.core_metric_every > 0 and (last_step or (step > 0 and step % args.core_metric_every == 0)):
         model.eval()
-        with disable_fp8(orig_model):
-            results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
-        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "core_metric": results["core_metric"],
-            "centered_results": results["centered_results"],
-        })
+        if use_fsdp:
+            # For FSDP, we can't easily use orig_model for variable-shape inputs
+            # because FSDP requires consistent shapes for all-gather. Skip CORE eval
+            # in FSDP mode for now, or run on a single rank with full model state.
+            print0(f"Step {step:05d} | CORE metric: skipped (not supported in FSDP mode yet)")
+        else:
+            with disable_fp8(orig_model):
+                results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
+            print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
+            wandb_run.log({
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "core_metric": results["core_metric"],
+                "centered_results": results["centered_results"],
+            })
         model.train()
 
     # once in a while: sample from the model (only on master process)
@@ -465,38 +505,76 @@ while True:
             "My favorite color is",
             "If 5*x + 3 = 13, then x is",
         ]
-        engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
-        for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
-            with disable_fp8(orig_model):
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            print0(tokenizer.decode(sample[0]))
+        if use_fsdp:
+            # For FSDP, we need to use the FSDP-wrapped model for sampling.
+            # This works because FSDP will all-gather params before forward.
+            # We create a separate uncompiled FSDP model for variable-shape inputs.
+            from nanochat.checkpoint_manager import load_model
+            sample_model, _, _ = load_model("base", device, phase="eval", model_tag=args.model_tag) if step > 0 else (None, None, None)
+            if sample_model is not None:
+                engine = Engine(sample_model, tokenizer)
+                for prompt in prompts:
+                    tokens = tokenizer(prompt, prepend="<|bos|>")
+                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                    print0(tokenizer.decode(sample[0]))
+                del sample_model
+            else:
+                print0("Sampling skipped: no checkpoint available yet")
+        else:
+            engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
+            for prompt in prompts:
+                tokens = tokenizer(prompt, prepend="<|bos|>")
+                with disable_fp8(orig_model):
+                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                print0(tokenizer.decode(sample[0]))
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != args.resume_from_step and args.save_every > 0 and step % args.save_every == 0):
-        save_checkpoint(
-            checkpoint_dir,
-            step,
-            orig_model.state_dict(), # model parameters
-            optimizer.state_dict(), # optimizer state
-            { # metadata saved as json
-                "step": step,
-                "val_bpb": val_bpb, # loss at last step
-                "model_config": model_config_kwargs,
-                "user_config": user_config, # inputs to the training script
-                "device_batch_size": args.device_batch_size,
-                "max_seq_len": args.max_seq_len,
-                "total_batch_size": total_batch_size,
-                "dataloader_state_dict": dataloader_state_dict,
-                "loop_state": { # all loop state (other than step) so that we can resume training
-                    "min_val_bpb": min_val_bpb,
-                    "smooth_train_loss": smooth_train_loss,
-                    "total_training_time": total_training_time,
+        if use_fsdp:
+            save_fsdp_checkpoint(
+                orig_model, optimizer,
+                checkpoint_dir, step,
+                { # metadata saved as json
+                    "step": step,
+                    "val_bpb": val_bpb,
+                    "model_config": model_config_kwargs,
+                    "user_config": user_config,
+                    "device_batch_size": args.device_batch_size,
+                    "max_seq_len": args.max_seq_len,
+                    "total_batch_size": total_batch_size,
+                    "dataloader_state_dict": dataloader_state_dict,
+                    "loop_state": {
+                        "min_val_bpb": min_val_bpb,
+                        "smooth_train_loss": smooth_train_loss,
+                        "total_training_time": total_training_time,
+                    },
                 },
-            },
-            rank=ddp_rank,
-        )
+                rank=ddp_rank,
+            )
+        else:
+            save_checkpoint(
+                checkpoint_dir,
+                step,
+                orig_model.state_dict(), # model parameters
+                optimizer.state_dict(), # optimizer state
+                { # metadata saved as json
+                    "step": step,
+                    "val_bpb": val_bpb, # loss at last step
+                    "model_config": model_config_kwargs,
+                    "user_config": user_config, # inputs to the training script
+                    "device_batch_size": args.device_batch_size,
+                    "max_seq_len": args.max_seq_len,
+                    "total_batch_size": total_batch_size,
+                    "dataloader_state_dict": dataloader_state_dict,
+                    "loop_state": { # all loop state (other than step) so that we can resume training
+                        "min_val_bpb": min_val_bpb,
+                        "smooth_train_loss": smooth_train_loss,
+                        "total_training_time": total_training_time,
+                    },
+                },
+                rank=ddp_rank,
+            )
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
