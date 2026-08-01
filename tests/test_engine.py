@@ -46,6 +46,8 @@ class MockModel:
         logits = torch.zeros(B, T, self.vocab_size)
         return logits
 
+    __call__ = forward
+
 
 class ByteTokenizer:
     """

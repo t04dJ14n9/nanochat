@@ -202,7 +202,9 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        # Call the module, rather than .forward(), so composable wrappers such
+        # as FSDP2 can run their pre/post-forward hooks.
+        logits = self.model(ids, kv_cache=kv_cache_prefill)
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
 
         # 2) Replicate the KV cache for each sample/row
@@ -272,7 +274,7 @@ class Engine:
 
             # Prepare logits for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
-            logits = self.model.forward(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
+            logits = self.model(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):
         """

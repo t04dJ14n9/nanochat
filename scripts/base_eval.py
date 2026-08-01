@@ -54,7 +54,7 @@ def place_eval_bundle(file_path):
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
 
-def evaluate_core(model, tokenizer, device, max_per_task=-1):
+def evaluate_core(model, tokenizer, device, max_per_task=-1, model_parallel=False):
     """
     Evaluate a base model on the CORE benchmark.
     Returns dict with results, centered_results, and core_metric.
@@ -106,7 +106,14 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
         if max_per_task > 0:
             data = data[:max_per_task]
 
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        accuracy = evaluate_task(
+            model,
+            tokenizer,
+            data,
+            device,
+            task_meta,
+            model_parallel=model_parallel,
+        )
         results[label] = accuracy
         random_baseline = random_baselines[label]
         centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)

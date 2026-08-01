@@ -241,7 +241,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     return is_correct
 
 
-def evaluate_task(model, tokenizer, data, device, task_meta):
+def evaluate_task(model, tokenizer, data, device, task_meta, model_parallel=False):
     """
     This function is responsible for evaluating one task across many examples.
     It also handles dispatch to all processes if the script is run with torchrun.
@@ -249,12 +249,15 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
-    # stride the examples to each rank
-    for idx in range(rank, len(data), world_size):
+    # Replicated models divide examples across ranks. A model-parallel model
+    # instead needs every rank to execute every forward pass so its parameter
+    # collectives remain aligned.
+    example_indices = range(len(data)) if model_parallel else range(rank, len(data), world_size)
+    for idx in example_indices:
         is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta)
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
-    if world_size > 1:
+    if world_size > 1 and not model_parallel:
         dist.barrier()
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
     # compute the mean

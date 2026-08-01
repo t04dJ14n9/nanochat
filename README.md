@@ -107,6 +107,26 @@ See an example [here](https://github.com/karpathy/nanochat/pull/498#issuecomment
 
 The important thing to note is that nanochat is written and configured around one single dial of complexity - the depth of the transformer. This single integer automatically determines all other hyperparameters (the width of the transformer, number of heads, learning rate adjustments, training horizons, weight decays, ...) so that the trained model comes out compute optimal. The idea is that the user doesn't have to think about or set any of this, they are simply asking for a smaller or bigger model using `--depth`, and everything "just works". By sweeping out the depth, you achieve the nanochat miniseries of compute optimal models at various sizes. GPT-2 capability model (which is of most interest at the moment) happens to be somewhere around d24-d26 range with the current code. But any candidate changes to the repo have to be principled enough that they work for all settings of depth.
 
+## Training a model larger than one GPU
+
+Base training has an opt-in [PyTorch FSDP2](https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html) mode. It shards parameters, gradients, and optimizer state across all ranks, then gathers one Transformer block at a time for computation. This lowers per-GPU model-state memory and allows a larger `--depth` than the default replicated mode:
+
+```bash
+OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
+    --parallelism=fsdp \
+    --depth=32 \
+    --device-batch-size=1 \
+    --model-tag=d32-fsdp \
+    --sample-every=-1 \
+    --core-metric-every=-1
+```
+
+FSDP checkpoints use PyTorch Distributed Checkpoint and are written to `base_checkpoints/<model-tag>/dcp_<step>/`. Resume with the same model arguments plus `--resume-from-step=<step>`; DCP can reshard the checkpoint when the world size changes.
+
+This is fully sharded data parallel rather than tensor-parallel matrix multiplication: each rank trains on a different micro-batch, while model state remains sharded at rest and is gathered layer-by-layer. The FSDP path currently uses native AdamW (`--fsdp-adamw-lr` and `--fsdp-adamw-weight-decay`) with low-memory single-tensor updates instead of nanochat's MuonAdamW. MuonAdamW performs its own distributed collectives and requires complete matrix gradients, which is incompatible with FSDP gradient shards. FP8 and FSDP cannot currently be combined. The original replicated/Muon training behavior is unchanged unless `--parallelism=fsdp` is passed.
+
+During gradient accumulation, FSDP reduce-scatters on every micro-step by default so accumulated gradients remain sharded. `--fsdp-gradient-sync=last` reduces communication but retains full gradients for early micro-steps and can OOM models near the memory limit.
+
 ## Running on CPU / MPS
 
 The script [runs/runcpu.sh](runs/runcpu.sh) shows a very simple example of running on CPU or Apple Silicon. It dramatically shrinks the LLM that is being trained to make things fit into a reasonable time interval of a few ten minutes of training. You will not get strong results in this way.
@@ -162,6 +182,7 @@ I've published a number of guides that might contain helpful information, most r
 │   ├── gpt.py                      # The GPT nn.Module Transformer
 │   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
 │   ├── optim.py                    # AdamW + Muon optimizer, 1GPU and distributed
+│   ├── parallelism.py              # FSDP2 model/gradient/optimizer sharding
 │   └── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
 ├── pyproject.toml
 ├── runs

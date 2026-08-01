@@ -6,6 +6,10 @@ import re
 import json
 import logging
 import torch
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+from torch.distributed.checkpoint.stateful import Stateful
 
 from nanochat.common import get_base_dir
 from nanochat.gpt import GPT, GPTConfig
@@ -18,6 +22,47 @@ logger = logging.getLogger(__name__)
 def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
+
+
+class _DistributedAppState(Stateful):
+    """DCP adapter for a possibly sharded model and its optimizer."""
+
+    def __init__(self, model, optimizer):
+        self.model = model
+        self.optimizer = optimizer
+
+    def state_dict(self):
+        model_state_dict, optimizer_state_dict = get_state_dict(self.model, self.optimizer)
+        return {
+            "model": model_state_dict,
+            "optim": optimizer_state_dict,
+        }
+
+    def load_state_dict(self, state_dict):
+        set_state_dict(
+            self.model,
+            self.optimizer,
+            model_state_dict=state_dict["model"],
+            optim_state_dict=state_dict["optim"],
+        )
+
+
+def distributed_checkpoint_path(checkpoint_dir, step):
+    """Return the DCP directory used by a fully sharded training checkpoint."""
+    return os.path.join(checkpoint_dir, f"dcp_{step:06d}")
+
+
+def _save_metadata(checkpoint_dir, step, meta_data):
+    meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta_data, f, indent=2)
+    logger.info(f"Saved metadata to: {meta_path}")
+
+
+def _load_metadata(checkpoint_dir, step):
+    meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 def _patch_missing_config_keys(model_config_kwargs):
     """Add default values for new config keys missing in old checkpoints."""
@@ -46,10 +91,7 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         torch.save(model_data, model_path)
         logger.info(f"Saved model parameters to: {model_path}")
         # Save the metadata dict as json
-        meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta_data, f, indent=2)
-        logger.info(f"Saved metadata to: {meta_path}")
+        _save_metadata(checkpoint_dir, step, meta_data)
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -67,10 +109,39 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
-    meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta_data = json.load(f)
+    meta_data = _load_metadata(checkpoint_dir, step)
     return model_data, optimizer_data, meta_data
+
+
+def save_distributed_checkpoint(checkpoint_dir, step, model, optimizer, meta_data, rank=0):
+    """Collectively save an FSDP2 model and optimizer with PyTorch DCP."""
+    if not dist.is_initialized():
+        raise RuntimeError("Distributed checkpointing requires an initialized process group")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = distributed_checkpoint_path(checkpoint_dir, step)
+    dcp.save(
+        {"app": _DistributedAppState(model, optimizer)},
+        checkpoint_id=checkpoint_path,
+    )
+    if rank == 0:
+        _save_metadata(checkpoint_dir, step, meta_data)
+        logger.info(f"Saved distributed model and optimizer to: {checkpoint_path}")
+    dist.barrier()
+
+
+def load_distributed_checkpoint(checkpoint_dir, step, model, optimizer):
+    """Collectively restore an FSDP2 model and optimizer from a DCP checkpoint."""
+    if not dist.is_initialized():
+        raise RuntimeError("Distributed checkpointing requires an initialized process group")
+    checkpoint_path = distributed_checkpoint_path(checkpoint_dir, step)
+    if not os.path.isdir(checkpoint_path):
+        raise FileNotFoundError(f"Distributed checkpoint not found: {checkpoint_path}")
+    state = {"app": _DistributedAppState(model, optimizer)}
+    dcp.load(state_dict=state, checkpoint_id=checkpoint_path)
+    meta_data = _load_metadata(checkpoint_dir, step)
+    dist.barrier()
+    log0(f"Loaded distributed model and optimizer from: {checkpoint_path}")
+    return meta_data
 
 
 def build_model(checkpoint_dir, step, device, phase):
